@@ -3,6 +3,8 @@
 filesdir=$1
 searchstr=$2
 
+# Check for correct count of arguments
+
 if test $# -ne 2
 then
 	echo "failed: must enter 2 arguments"
