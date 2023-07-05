@@ -1,4 +1,5 @@
 #!/bin/sh
+# Author: bwaggle
 
 if test $# -ne 2
 then
