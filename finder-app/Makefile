@@ -4,7 +4,7 @@
 # writer.o: writer.c
 # 	gcc -c writer.c -o writer.o
 
-CC = gcc
+CC = $(CROSS_COMPILE)gcc
 OBJFILES = writer.o
 MAIN = writer
 
