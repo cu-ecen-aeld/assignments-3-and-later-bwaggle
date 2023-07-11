@@ -14,6 +14,7 @@ int main(int argc, char *argv[]) {
     // Open syslog connection
     openlog("writer", LOG_PID, LOG_USER);
 
+    // Open File 
     FILE *file = fopen(writefile, "w");
 
     if (file == NULL) {
@@ -34,7 +35,7 @@ int main(int argc, char *argv[]) {
     closelog();
 
     // Print success message
-    printf("Successfully wrote '%s' to file '%s' using syslog.\n", writestr, writefile);
+    printf("Successfully wrote '%s' to file '%s'\n", writestr, writefile);
 
     return 0;
 }
