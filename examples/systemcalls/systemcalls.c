@@ -1,4 +1,10 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <string.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +22,23 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
+    int ret;
+    ret = system(cmd);
+    if (ret == -1) {
+        return false;
+    }
     return true;
+}
+
+/* Check for an absolute path*/
+bool check_absolute_path(const char* path) {
+    if (path != NULL && strlen(path) > 0) {
+        if (path[0] == '/') {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -58,6 +79,28 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+   
+
+    int status;
+    // int ret;
+    pid_t pid;
+
+    pid = fork();
+    if (pid == -1) {
+        return false;
+    } else if (pid == 0) {
+        if (count == 2 && !check_absolute_path(command[0])) {
+            return false;
+        } else if (count == 3 && !check_absolute_path(command[2])) {
+            return false;
+        }
+
+        execv(command[0], command);
+        return false;
+    }
+
+    if (waitpid (pid, &status, 0) == -1)
+        return false;
 
     va_end(args);
 
