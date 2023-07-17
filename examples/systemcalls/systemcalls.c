@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <sys/wait.h>
 #include <string.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -82,19 +83,18 @@ bool do_exec(int count, ...)
    
 
     int status;
-    // int ret;
     pid_t pid;
+
+    if (count == 2 && !check_absolute_path(command[0])) {
+        return false;
+    } else if (count == 3 && !check_absolute_path(command[2])) {
+        return false;
+    }
 
     pid = fork();
     if (pid == -1) {
         return false;
     } else if (pid == 0) {
-        if (count == 2 && !check_absolute_path(command[0])) {
-            return false;
-        } else if (count == 3 && !check_absolute_path(command[2])) {
-            return false;
-        }
-
         execv(command[0], command);
         return false;
     }
@@ -135,6 +135,43 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+
+pid_t pid;
+int status;
+int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+
+if (fd < 0) { 
+    perror("open");
+    // abort(); 
+    return false;
+}
+
+switch (pid = fork()) {
+    case -1: 
+        perror("fork"); 
+        abort();
+        return false;
+
+    case 0:
+        if (dup2(fd, 1) < 0) {
+            perror("dup2");
+            abort();
+        }
+
+        execv(command[0], command);
+        perror("fork");
+        abort();
+        return false;
+
+    default:
+        waitpid(pid, &status, 0);
+        close(fd);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            return true;
+        } else {
+            return false;
+        }
+}
 
     va_end(args);
 
