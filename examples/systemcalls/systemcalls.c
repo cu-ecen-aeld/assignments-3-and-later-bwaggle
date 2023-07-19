@@ -80,7 +80,6 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-   
 
     int status;
     pid_t pid;
