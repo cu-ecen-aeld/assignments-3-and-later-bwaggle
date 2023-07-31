@@ -15,7 +15,7 @@
 #include <linux/fs.h>
 
 #define PORT "9000"
-#define BUFFER_SIZE 110000
+#define BUFFER_SIZE 100000
 
 int global_sockfd;
 FILE* global_file = NULL;
