@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/bin/sh
 
 DAEMON_NAME="aesdsocket"
 DAEMON_PATH="/usr/bin/$DAEMON_NAME"
-DAEMON_USER="bwaggle"  # Replace "your_username" with the username of the user who owns the daemon
+DAEMON_USER="root"  # Replace "your_username" with the username of the user who owns the daemon
 
 start() {
     if start-stop-daemon --start --oknodo --background --chuid "$DAEMON_USER" --exec "$DAEMON_PATH"; then
