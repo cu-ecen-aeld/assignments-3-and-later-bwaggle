@@ -56,8 +56,8 @@ void *get_in_addr(struct sockaddr *sa) {
 }
 
 // Function to extract data up to the first newline character
-char* extractDataUpToNewline(char* buf, int nread) {
-    char newString[BUFFER_SIZE];
+char* extractDataUpToNewline(char* buf, const int nread) {
+
     int newlineIndex = -1;
 
     for (int i = 0; i < nread; i++) {
@@ -66,16 +66,22 @@ char* extractDataUpToNewline(char* buf, int nread) {
             break;
         }
     }
+    int new_size = newlineIndex + 2;
+    char *new_string = (char*)malloc(new_size * sizeof(char));
+    
+    printf("\n");
 
     if (newlineIndex != -1) {
-        strncpy(newString, buf, newlineIndex); // Copy characters up to the newline
-        newString[newlineIndex] = '\0'; // Null-terminate the new string
-    } else {
-        strcpy(newString, buf); // If no newline found, copy the entire buf to newString
+        for (size_t j = 0; j < new_size; j++) {
+            new_string[j] = buf[j];
+            printf("%c%c", buf[j], new_string[j]);
+        }
+        printf("last index = %d\n", newlineIndex + 1);
+        new_string[newlineIndex + 1] = '\0';
+        printf("New string: %s", new_string);
     }
-
-    char* result = strdup(newString); // Allocate memory for the result and copy the newString
-    return result;
+ 
+    return new_string;
 }
 
 char* readEntireFile(FILE* file, long* fsize) {
@@ -86,7 +92,7 @@ char* readEntireFile(FILE* file, long* fsize) {
     fseek(file, 0, SEEK_SET);
 
     *fsize = file_size;
-    printf("File size = %lu", file_size);
+    printf("File size = %lu\n", file_size);
 
     // Allocate memory for the file contents (+1 for null-terminator)
     char* file_contents = (char*)malloc(file_size + 1);
@@ -201,10 +207,6 @@ int main() {
     if (chdir("/") == -1)
         return -1;
 
-    // open ("/dev/null", O_RDWR);
-    // dup (0);
-    // dup (0);
-
     // Start listening on port 9000
     if (listen(sockfd, 10) == -1) {
         perror("listen");
@@ -212,23 +214,7 @@ int main() {
     }
     printf("Listening on port 9000\n");
 
-    // sa.sa_handler = sigchld_handler;
-    // sigemptyset(&sa.sa_mask);
-    // sa.sa_flags = SA_RESTART;
-    // if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-    //     perror("sigaction");
-    //     return -1;
-    // }
-
     printf("server: waiting for connections...\n");
-
-    // remove file
-    // const char* file_path = "/var/tmp/aesdsocketdata";
-    // if (remove("file_path") == 0) {
-    //     printf("Removing file %s", file_path);
-    // } else {
-    //     perror("Error deleting file");
-    // }
 
     // File handler
     FILE* file = fopen("/var/tmp/aesdsocketdata", "w+");
@@ -267,7 +253,7 @@ int main() {
 
         buf[nread] = '\0'; 
         char* newString = extractDataUpToNewline(buf, nread);
-        strcat(newString, "\n");
+        // strcat(newString, "\n");
 
         fprintf(file, "%s", newString);
         printf("New string up to the newline: %s", newString);
@@ -287,11 +273,13 @@ int main() {
         if (sendto(new_fd, contents_to_send, fsize, 0, (struct sockaddr *) &client_addr, sin_size) != fsize) {
             perror("send");
             fprintf(stderr, "Error sending response\n");
+
         } else {
             printf("Sent file contents to client\n%s\nsize: %lu\n", contents_to_send, fsize);
             close(new_fd);
             syslog(LOG_INFO, "Closed connection from %s", s);
         }
+        free (contents_to_send);
 
     }
     closelog();
