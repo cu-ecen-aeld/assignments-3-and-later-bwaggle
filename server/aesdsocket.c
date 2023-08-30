@@ -76,7 +76,6 @@ void *get_in_addr(struct sockaddr *sa) {
 }
 
 int establish_socket_connection() {
-    int sockfd;
     struct addrinfo hints, *servinfo, *p;
     int yes=1;
     int rv;
@@ -95,18 +94,18 @@ int establish_socket_connection() {
     // Establish socket connection and bind to the socket
     printf(">> Establish socket and bind\n");
     for (p = servinfo; p != NULL; p = p->ai_next) {
-        if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+        if ((global_sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
             perror("server: socket");
             continue;
         }
 
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+        if (setsockopt(global_sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
             perror("setsockopt");
             return -1;
         }
 
-        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-            close(sockfd);
+        if (bind(global_sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(global_sockfd);
             perror("server: bind");
             continue;
         }
@@ -114,14 +113,11 @@ int establish_socket_connection() {
     }
 
     freeaddrinfo(servinfo);
-    global_sockfd = sockfd;
-
 
     if (p == NULL) {
         fprintf(stderr, "server: failed to bind\n");
         return -1;
     }
-    return sockfd;
 }
 
 int start_daemon_mode() {
@@ -213,7 +209,7 @@ char* readEntireFile(FILE* file, long* fsize) {
 
 
 int main() {
-    int sockfd, new_fd;
+    int new_fd;
     struct sockaddr_storage client_addr;
     socklen_t sin_size;
  
@@ -229,8 +225,8 @@ int main() {
     if (register_signal_handlers() == -1) return -1;
 
     // Establish connection
-    sockfd = establish_socket_connection();
-    if (sockfd == -1) {
+    establish_socket_connection();
+    if (global_sockfd == -1) {
         perror("Error establishing socket connection");
         return -1;
     }
@@ -243,7 +239,7 @@ int main() {
     }
 
     // Start listening on port 9000
-    if (listen(sockfd, 10) == -1) {
+    if (listen(global_sockfd, 10) == -1) {
         perror("listen");
         return -1;
     }
@@ -262,7 +258,7 @@ int main() {
         sin_size = sizeof client_addr;
         char host[NI_MAXHOST], service[NI_MAXSERV];
 
-        new_fd = accept(sockfd, (struct sockaddr *)&client_addr, &sin_size);
+        new_fd = accept(global_sockfd, (struct sockaddr *)&client_addr, &sin_size);
         printf("\nNow accepting packets on new_fd: %d\n", new_fd);
         if (new_fd == -1) {
             perror("accept");
@@ -332,7 +328,7 @@ int main() {
 
     }
     closelog();
-    close(sockfd);
+    close(global_sockfd);
     
     return 0;
 }
