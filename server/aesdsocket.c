@@ -27,7 +27,7 @@ void handle_sigterm(int signum) {
     fclose(global_file);
     const char* file_path = "/var/tmp/aesdsocketdata";
     if (remove(file_path) == 0) {
-        printf("Removing file %s", file_path);
+        printf("Removing file %s\n", file_path);
     } else {
         perror("Error deleting file");
     }
@@ -41,105 +41,15 @@ void handle_sigint(int signum) {
     fclose(global_file);
     const char* file_path = "/var/tmp/aesdsocketdata";
     if (remove(file_path) == 0) {
-        printf("Removing file %s", file_path);
+        printf("Removing file %s\n", file_path);
     } else {
         perror("Error deleting file");
     }
     exit(EXIT_SUCCESS);
 }
 
-void *get_in_addr(struct sockaddr *sa) {
-    if (sa->sa_family == AF_INET) {
-        return &(((struct sockaddr_in*)sa)->sin_addr);
-    }
-    return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-// Function to extract data up to the first newline character
-char* extractDataUpToNewline(char* buf, const int nread) {
-
-    int newlineIndex = -1;
-
-    for (int i = 0; i < nread; i++) {
-        if (buf[i] == '\n') {
-            newlineIndex = i;
-            break;
-        }
-    }
-    int new_size = newlineIndex + 2;
-    char *new_string = (char*)malloc(new_size * sizeof(char));
-    
-    printf("\n");
-
-    if (newlineIndex != -1) {
-        for (size_t j = 0; j < new_size; j++) {
-            new_string[j] = buf[j];
-            printf("%c%c", buf[j], new_string[j]);
-        }
-        printf("last index = %d\n", newlineIndex + 1);
-        new_string[newlineIndex + 1] = '\0';
-        printf("New string: %s", new_string);
-    }
- 
-    return new_string;
-}
-
-char* readEntireFile(FILE* file, long* fsize) {
-
-    // Get the file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    *fsize = file_size;
-    printf("File size = %lu\n", file_size);
-
-    // Allocate memory for the file contents (+1 for null-terminator)
-    char* file_contents = (char*)malloc(file_size + 1);
-    if (file_contents == NULL) {
-        fclose(file);
-        perror("Memory allocation failed");
-        return NULL;
-    }
-
-    // Read the entire file into file_contents
-    size_t read_size = fread(file_contents, 1, file_size, file);
-    if (read_size != file_size) {
-        fclose(file);
-        free(file_contents);
-        perror("Error reading file");
-        return NULL;
-    }
-
-    // Null-terminate the string
-    file_contents[file_size] = '\0';
-
-    return file_contents;
-}
-
-
-int main() {
-    int sockfd, new_fd;
-    struct addrinfo hints, *servinfo, *p;
-    struct sockaddr_storage client_addr;
-    socklen_t sin_size;
-    int rv;
-    char s[INET6_ADDRSTRLEN];
+int register_signal_handlers() {
     struct sigaction sa;
-    ssize_t nread;
-    char buf[BUFFER_SIZE];
-    pid_t pid;
-    int yes=1;
-
-
-    // Obtain address matching host port
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    // Open syslog connection
-    openlog("aesdsocket", LOG_PID, LOG_USER);
 
     // Register signal handlers for SIGTERM and SIGINT
     sa.sa_handler = handle_sigterm;
@@ -156,9 +66,27 @@ int main() {
         perror("sigint handler");
         return -1;
     }
+}
+
+void *get_in_addr(struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+int establish_socket_connection() {
+    int sockfd;
+    struct addrinfo hints, *servinfo, *p;
+    int yes=1;
+    int rv;
+    // Configure host port
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
     // Get Address Info to open socket
-    printf(">> getaddrinfo");
     if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
         fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rv));
         return -1;
@@ -188,13 +116,16 @@ int main() {
     freeaddrinfo(servinfo);
     global_sockfd = sockfd;
 
+
     if (p == NULL) {
         fprintf(stderr, "server: failed to bind\n");
         return -1;
     }
+    return sockfd;
+}
 
-    // Daemonize
-    pid = fork();
+int start_daemon_mode() {
+    int pid = fork();
     printf("Starting daemon on pid: %d\n", pid);
     if (pid == -1)
         return -1;
@@ -207,13 +138,116 @@ int main() {
     if (chdir("/") == -1)
         return -1;
 
+    return pid;
+}
+
+char* extractDataUpToNewLine(char *buf, int nread, int* new_line_found) {
+    int new_line_index = -1;
+
+    // Search for new line character
+    for (int i = 0; i < nread; i++) {
+        if (buf[i] == '\n') {
+            new_line_index = i;
+            *new_line_found = 1;
+            break;
+        }
+    }
+
+    // If no newline found, return NULL
+    if (new_line_index == -1) {
+        *new_line_found = 0;
+        new_line_index = nread - 1;
+        //return NULL;
+    }
+
+    // Allocate memory for the new string
+    int new_size = new_line_index + 2;
+    char* new_string = (char*)malloc(new_size * sizeof(char));
+    if (new_string == NULL) {
+        perror("Memory allocation failed");
+        return NULL;
+    }
+
+    // Copy the data up to the newline character
+    for (int j = 0; j < new_size; j++) {
+        new_string[j] = buf[j];
+    }
+    new_string[new_line_index + 1] = '\0';
+
+    return new_string;
+
+}
+
+char* readEntireFile(FILE* file, long* fsize) {
+
+    // Get the file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    *fsize = file_size;
+    //printf("File size = %lu\n", file_size);
+
+    // Allocate memory for the file contents (+1 for null-terminator)
+    char* file_contents = (char*)malloc(file_size + 1);
+    if (file_contents == NULL) {
+        fclose(file);
+        perror("Memory allocation failed");
+        return NULL;
+    }
+
+    // Read the entire file into file_contents
+    size_t read_size = fread(file_contents, 1, file_size, file);
+    if (read_size != file_size) {
+        fclose(file);
+        free(file_contents);
+        perror("Error reading file");
+        return NULL;
+    }
+
+    // Null-terminate the string
+    file_contents[file_size] = '\0';
+
+    return file_contents;
+}
+
+
+int main() {
+    int sockfd, new_fd;
+    struct sockaddr_storage client_addr;
+    socklen_t sin_size;
+ 
+    char s[INET6_ADDRSTRLEN];
+    ssize_t nread;
+    char buf[BUFFER_SIZE];
+    pid_t pid;
+
+    // Open syslog connection
+    openlog("aesdsocket", LOG_PID, LOG_USER);
+
+    // Register signal handlers
+    if (register_signal_handlers() == -1) return -1;
+
+    // Establish connection
+    sockfd = establish_socket_connection();
+    if (sockfd == -1) {
+        perror("Error establishing socket connection");
+        return -1;
+    }
+
+    // Daemonize
+    pid = start_daemon_mode();
+    if (pid == -1) {
+        perror("Error starting daemon mode");
+        return -1;
+    }
+
     // Start listening on port 9000
     if (listen(sockfd, 10) == -1) {
         perror("listen");
         return -1;
     }
     printf("Listening on port 9000\n");
-
     printf("server: waiting for connections...\n");
 
     // File handler
@@ -223,17 +257,13 @@ int main() {
         perror("Error opening file");
         return -1;
     }
-    // Truncate file
-    // fseek(file, 0, SEEK_SET);
-    // ftruncate(fileno(file), 0);
-
 
     while(1) {
         sin_size = sizeof client_addr;
         char host[NI_MAXHOST], service[NI_MAXSERV];
 
         new_fd = accept(sockfd, (struct sockaddr *)&client_addr, &sin_size);
-        printf("Now accepting packets on new_fd: %d\n", new_fd);
+        printf("\nNow accepting packets on new_fd: %d\n", new_fd);
         if (new_fd == -1) {
             perror("accept");
             continue;
@@ -244,20 +274,37 @@ int main() {
             s, sizeof s);
         printf("server: got connection from %s\n", s);
         syslog(LOG_INFO, "Accepted connection from %s", s);
+
+        read_data:
         
         nread = recvfrom(new_fd, buf, BUFFER_SIZE, 0, 
                         (struct sockaddr *) &client_addr, &sin_size);
         
-        if (nread == -1) continue;
+        if (nread == -1) {
+            perror("recvfrom");
+            close(new_fd);
+            continue;
+        };
         printf("received %zd bytes from %s", nread, s);
 
         buf[nread] = '\0'; 
-        char* newString = extractDataUpToNewline(buf, nread);
-        // strcat(newString, "\n");
+        int new_line_found = 0;
+        char* newString = extractDataUpToNewLine(buf, nread, &new_line_found);
 
         fprintf(file, "%s", newString);
-        printf("New string up to the newline: %s", newString);
         free(newString);
+
+        if (new_line_found) {
+            printf("\nNEWLINE FOUND\n");
+        } else {
+            printf("\nNEWLINE NOT FOUND ... continuing\n");
+            // fprintf(file, "%c", '\n');
+            goto read_data;
+            // close(new_fd);
+            // continue;
+            // free(newString);
+        }
+        
 
         long fsize;
         char* contents_to_send = readEntireFile(file, &fsize);
@@ -265,19 +312,21 @@ int main() {
  
         if (contents_to_send != NULL) {
             // Now you can use the "file_contents" variable containing the file content
-            printf("File Contents:\n%s\n", contents_to_send);
+            //printf("File Contents:\n%s\n", contents_to_send);
 
              // Don't forget to free the memory when you're done using it
         }
 
         if (sendto(new_fd, contents_to_send, fsize, 0, (struct sockaddr *) &client_addr, sin_size) != fsize) {
-            perror("send");
+            perror("sendto");
             fprintf(stderr, "Error sending response\n");
+            close(new_fd);
 
         } else {
-            printf("Sent file contents to client\n%s\nsize: %lu\n", contents_to_send, fsize);
-            close(new_fd);
+            //printf("Sent file contents to client\n%s\nsize: %lu\n", contents_to_send, fsize);
+            printf("Sent file contents to client\nsize: %lu\n", fsize);
             syslog(LOG_INFO, "Closed connection from %s", s);
+            close(new_fd);
         }
         free (contents_to_send);
 
