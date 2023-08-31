@@ -4,10 +4,10 @@
 # writer.o: writer.c
 # 	gcc -c writer.c -o writer.o
 
-CC = $(CROSS_COMPILE)gcc
-OBJFILES = aesdsocket.o
-MAIN = aesdsocket
-CFLAGS = -g -Wall -Werror -pthread
+CC ?= $(CROSS_COMPILE)gcc
+OBJFILES ?= aesdsocket.o
+MAIN ?= aesdsocket
+CFLAGS ?= -g -Wall -Werror -pthread
 
 all: $(MAIN)
 
