@@ -56,19 +56,19 @@ void add_timestamp_to_file(FILE *file) {
   
 }
 
+// Thread that writes timestamp to file every 10 seconds
 void *timer_thread_function(void *arg) {
     FILE* file = (FILE *)arg;
     printf("Timer thread is starting ... \n");
-    // Write timestamp to file every 10 seconds
+
     while(1) {
-        // pthread_mutex_lock(&file_mutex);
         add_timestamp_to_file(file);
-        // pthread_mutex_unlock(&file_mutex);
         sleep(10);
     }
     return NULL;
 }
 
+// Get Socket IP address
 void *get_in_addr(struct sockaddr *sa) {
     if (sa->sa_family == AF_INET) {
         return &(((struct sockaddr_in*)sa)->sin_addr);
@@ -76,7 +76,8 @@ void *get_in_addr(struct sockaddr *sa) {
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-char* extractDataUpToNewLine(char *buf, int nread, int* new_line_found) {
+// Extract packet data up to the newline character
+char* extract_data_up_to_newline(char *buf, int nread, int* new_line_found) {
     int new_line_index = -1;
 
     // Search for new line character
@@ -88,11 +89,10 @@ char* extractDataUpToNewLine(char *buf, int nread, int* new_line_found) {
         }
     }
 
-    // If no newline found, return NULL
+    // Set newline flag
     if (new_line_index == -1) {
         *new_line_found = 0;
         new_line_index = nread - 1;
-        //return NULL;
     }
 
     // Allocate memory for the new string
@@ -121,7 +121,6 @@ char* readEntireFile(FILE* file, long* fsize) {
     fseek(file, 0, SEEK_SET);
 
     *fsize = file_size;
-    //printf("File size = %lu\n", file_size);
 
     // Allocate memory for the file contents (+1 for null-terminator)
     char* file_contents = (char*)malloc(file_size + 1);
@@ -146,12 +145,14 @@ char* readEntireFile(FILE* file, long* fsize) {
     return file_contents;
 }
 
+// Thread that processes each client packet and echos back the response
 void *handle_connection(void *arg) {
     struct ThreadInfo *info = (struct ThreadInfo *)arg;
     int client_socket = info->client_socket;
     struct sockaddr_storage client_thread_address_local = info->client_thread_addr;
     socklen_t sin_thread_size_local = info->sin_thread_size;
     ssize_t nread;
+    long fsize;
     char buf[BUFFER_SIZE];
     char s[INET6_ADDRSTRLEN];
 
@@ -164,7 +165,7 @@ void *handle_connection(void *arg) {
     printf("server: got connection from %s\n", s);
     syslog(LOG_INFO, "Accepted connection from %s", s);
 
-    // Process incoming data packets
+    // Process incoming data packets until no data left
     while ((nread = recvfrom(client_socket, buf, BUFFER_SIZE, 0, (struct sockaddr *) &client_thread_address_local, &sin_thread_size_local)) > 0) {
         
         printf("received %zd bytes", nread);
@@ -176,9 +177,11 @@ void *handle_connection(void *arg) {
         };
         
         pthread_mutex_lock(&file_mutex);
+
+        // TODO Move buf into ThreadInfo structure (shared between threads)
         buf[nread] = '\0'; 
         int new_line_found = 0;
-        char* newString = extractDataUpToNewLine(buf, nread, &new_line_found);
+        char* newString = extract_data_up_to_newline(buf, nread, &new_line_found);
 
         fprintf(global_file, "%s", newString);
         free(newString);
@@ -194,9 +197,14 @@ void *handle_connection(void *arg) {
         
     }
 
-    long fsize;
+    // Read entire contennts of appended file
+    // Packets are appended by each thread independently
     char* contents_to_send = readEntireFile(global_file, &fsize);
+    if (contents_to_send == NULL) {
+        free(contents_to_send);
+    }
 
+    // Send file contents pack to client
     if (sendto(client_socket, contents_to_send, fsize, 0, (struct sockaddr *) &client_thread_address_local, sin_thread_size_local) != fsize) {
         perror("sendto");
         fprintf(stderr, "Error sending response\n");
@@ -205,16 +213,20 @@ void *handle_connection(void *arg) {
     } else {
         printf("Sent file contents to client\nsize: %lu\n", fsize);
         syslog(LOG_INFO, "Closed connection from %s", s);
-        // close(client_socket);
     }
+
+    // Cleanup
     free (contents_to_send);
     close (client_socket);
 
+    // Lets the cleanup process in main know that the thread is done
     info->thread_complete_flag = 1;
     pthread_exit(NULL);
 }
 
-void cleanup_threads() {
+// Loop the threads, check for compelete status.
+// If complete, remove from linked list and exit
+void cleanup_threads(pthread_t timer_thread_id) {
     struct ThreadInfo *info, *tmp;
     pthread_mutex_lock(&thread_list_mutex);
     
@@ -232,6 +244,10 @@ void cleanup_threads() {
     }
 
     pthread_mutex_unlock(&thread_list_mutex);
+
+    // if (info == NULL) {
+    //     pthread_kill(timer_thread_id, SIGTERM);
+    // }
 }
 
 
@@ -254,6 +270,7 @@ void handle_sigint(int signum) {
     printf("Received SIGINT. Exiting gracefully.\n");
     close(server_socket);
     fclose(global_file);
+    closelog();
     const char* file_path = "/var/tmp/aesdsocketdata";
     if (remove(file_path) == 0) {
         printf("Removing file %s\n", file_path);
@@ -263,10 +280,10 @@ void handle_sigint(int signum) {
     exit(EXIT_SUCCESS);
 }
 
+// Register signal handlers for SIGTERM and SIGINT
 int register_signal_handlers() {
     struct sigaction sa;
 
-    // Register signal handlers for SIGTERM and SIGINT
     sa.sa_handler = handle_sigterm;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
@@ -349,17 +366,12 @@ int main() {
     int client_socket;
     struct sockaddr_storage client_addr;
     socklen_t sin_size = sizeof client_addr;
-
-    global_file = fopen("/var/tmp/aesdsocketdata", "a+");
- 
     char s[INET6_ADDRSTRLEN];
-    ssize_t nread;
     pid_t pid;
 
-    // Start timer thread
-    //pthread_t timer_thread;
-    //pthread_create(&timer_thread, NULL, timer_thread_function, global_file);
-    
+    // All child threads write to this file
+    global_file = fopen("/var/tmp/aesdsocketdata", "a+");
+ 
 
     // Open syslog connection
     openlog("aesdsocket", LOG_PID, LOG_USER);
@@ -367,7 +379,7 @@ int main() {
     // Register signal handlers
     if (register_signal_handlers() == -1) return -1;
 
-    // Establish connection
+    // Establish server connection
     establish_socket_connection();
     if (server_socket == -1) {
         perror("Error establishing socket connection");
@@ -393,28 +405,21 @@ int main() {
     pthread_t timer_thread;
     if(pthread_create(&timer_thread, NULL, timer_thread_function, global_file)) {
         perror("Timer thread create");
-        goto cleanup;
+        goto cleanup_timer;
     }
 
-    // time_t last_timestamp_time = time(NULL);
-
     while(1) {
-        // time_t current_time = time(NULL);
-        // printf("Checking time stamp");
-        // if (current_time - last_timestamp_time >= 10) {
-        //     pthread_mutex_lock(&file_mutex);
-        //     add_timestamp_to_file(global_file);
-        //     pthread_mutex_unlock(&file_mutex);
-        //     last_timestamp_time = current_time;
-        // }
+        // Wait for and accept a client connection
         printf("\n Waiting for connection \n");
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &sin_size);
+        
         printf("\nNow accepting packets on client_socket: %d\n", client_socket);
         if (client_socket == -1) {
             perror("accept");
             continue;
         }
 
+        // Populate the thread info structure
         struct ThreadInfo *info = (struct ThreadInfo *)malloc(sizeof(struct ThreadInfo));
         if (info == NULL) {
             perror("Thread memory allocation error");
@@ -426,17 +431,19 @@ int main() {
         info->client_thread_addr = client_addr;
         info->thread_complete_flag = 0;
 
+        // Create the thread that handles reading and writing
+        // packets for the client connetion
         pthread_create(&info->thread_id, NULL, handle_connection, info);
+
+        // Insert the thread's info into the linked list
         pthread_mutex_lock(&thread_list_mutex);
         SLIST_INSERT_HEAD(&thread_list, info, entries);
         pthread_mutex_unlock(&thread_list_mutex);
 
-        // pthread_join(timer_thread, NULL);
-        cleanup_threads();
+        cleanup_threads(timer_thread);
     }
 
-    cleanup:
-    closelog();
+    cleanup_timer:
     close(server_socket);
     
     return 0;
