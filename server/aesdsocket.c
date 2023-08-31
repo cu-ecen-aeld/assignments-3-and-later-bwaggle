@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -13,59 +14,59 @@
 #include <syslog.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <pthread.h>
+#include <sys/queue.h>
+#include <stddef.h>
 
 #define PORT "9000"
 #define BUFFER_SIZE 100000
 
-int global_sockfd;
+int server_socket;
 FILE* global_file = NULL;
 
-void handle_sigterm(int signum) {
-    // Perform cleanup actions here (e.g., releasing resources, closing files)
-    printf("Received SIGTERM. Cleaning up.\n");
-    close(global_sockfd);
-    fclose(global_file);
-    const char* file_path = "/var/tmp/aesdsocketdata";
-    if (remove(file_path) == 0) {
-        printf("Removing file %s\n", file_path);
-    } else {
-        perror("Error deleting file");
-    }
-    exit(EXIT_SUCCESS);
+struct ThreadInfo {
+    pthread_t thread_id;
+    int client_socket;
+    int thread_complete_flag;
+    struct sockaddr_storage client_thread_addr;
+    socklen_t sin_thread_size;
+    SLIST_ENTRY(ThreadInfo) entries;
+};
+
+SLIST_HEAD(ThreadList, ThreadInfo) thread_list = SLIST_HEAD_INITIALIZER(thread_list);
+
+pthread_mutex_t thread_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void add_timestamp_to_file(FILE *file) {
+    time_t current_time;
+    struct tm *time_info;
+    char timestamp[128];
+
+    time(&current_time);
+    time_info = localtime(&current_time);
+
+    strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z", time_info);
+
+    pthread_mutex_lock(&file_mutex);
+    fprintf(file, "%s\n", timestamp);
+    pthread_mutex_unlock(&file_mutex);
+    printf("%s\n", timestamp);
+
+  
 }
 
-void handle_sigint(int signum) {
-    // Perform cleanup actions here (e.g., releasing resources, closing files)
-    printf("Received SIGINT. Exiting gracefully.\n");
-    close(global_sockfd);
-    fclose(global_file);
-    const char* file_path = "/var/tmp/aesdsocketdata";
-    if (remove(file_path) == 0) {
-        printf("Removing file %s\n", file_path);
-    } else {
-        perror("Error deleting file");
+void *timer_thread_function(void *arg) {
+    FILE* file = (FILE *)arg;
+    printf("Timer thread is starting ... \n");
+    // Write timestamp to file every 10 seconds
+    while(1) {
+        // pthread_mutex_lock(&file_mutex);
+        add_timestamp_to_file(file);
+        // pthread_mutex_unlock(&file_mutex);
+        sleep(10);
     }
-    exit(EXIT_SUCCESS);
-}
-
-int register_signal_handlers() {
-    struct sigaction sa;
-
-    // Register signal handlers for SIGTERM and SIGINT
-    sa.sa_handler = handle_sigterm;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
-    if (sigaction(SIGTERM, &sa, NULL) == -1) {
-        perror("sigterm handler");
-        return -1;
-    }
-
-    sa.sa_handler = handle_sigint;
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        perror("sigint handler");
-        return -1;
-    }
+    return NULL;
 }
 
 void *get_in_addr(struct sockaddr *sa) {
@@ -73,68 +74,6 @@ void *get_in_addr(struct sockaddr *sa) {
         return &(((struct sockaddr_in*)sa)->sin_addr);
     }
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-int establish_socket_connection() {
-    struct addrinfo hints, *servinfo, *p;
-    int yes=1;
-    int rv;
-    // Configure host port
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    // Get Address Info to open socket
-    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
-        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rv));
-        return -1;
-    }
-
-    // Establish socket connection and bind to the socket
-    printf(">> Establish socket and bind\n");
-    for (p = servinfo; p != NULL; p = p->ai_next) {
-        if ((global_sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-            perror("server: socket");
-            continue;
-        }
-
-        if (setsockopt(global_sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-            perror("setsockopt");
-            return -1;
-        }
-
-        if (bind(global_sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-            close(global_sockfd);
-            perror("server: bind");
-            continue;
-        }
-        break;
-    }
-
-    freeaddrinfo(servinfo);
-
-    if (p == NULL) {
-        fprintf(stderr, "server: failed to bind\n");
-        return -1;
-    }
-}
-
-int start_daemon_mode() {
-    int pid = fork();
-    printf("Starting daemon on pid: %d\n", pid);
-    if (pid == -1)
-        return -1;
-    else if (pid != 0)
-        exit (EXIT_SUCCESS);
-
-    if (setsid() == -1)
-        return -1;
-
-    if (chdir("/") == -1)
-        return -1;
-
-    return pid;
 }
 
 char* extractDataUpToNewLine(char *buf, int nread, int* new_line_found) {
@@ -207,16 +146,220 @@ char* readEntireFile(FILE* file, long* fsize) {
     return file_contents;
 }
 
+void *handle_connection(void *arg) {
+    struct ThreadInfo *info = (struct ThreadInfo *)arg;
+    int client_socket = info->client_socket;
+    struct sockaddr_storage client_thread_address_local = info->client_thread_addr;
+    socklen_t sin_thread_size_local = info->sin_thread_size;
+    ssize_t nread;
+    char buf[BUFFER_SIZE];
+    char s[INET6_ADDRSTRLEN];
+
+
+    printf("Thread %lu processing client socket %d\n", info->thread_id, client_socket);
+
+    inet_ntop(client_thread_address_local.ss_family,
+    get_in_addr((struct sockaddr *)&client_thread_address_local),
+    s, sizeof s);
+    printf("server: got connection from %s\n", s);
+    syslog(LOG_INFO, "Accepted connection from %s", s);
+
+    // Process incoming data packets
+    while ((nread = recvfrom(client_socket, buf, BUFFER_SIZE, 0, (struct sockaddr *) &client_thread_address_local, &sin_thread_size_local)) > 0) {
+        
+        printf("received %zd bytes", nread);
+
+        if (nread == -1) {
+            perror("recvfrom");
+            close(client_socket);
+            break;
+        };
+        
+        pthread_mutex_lock(&file_mutex);
+        buf[nread] = '\0'; 
+        int new_line_found = 0;
+        char* newString = extractDataUpToNewLine(buf, nread, &new_line_found);
+
+        fprintf(global_file, "%s", newString);
+        free(newString);
+        pthread_mutex_unlock(&file_mutex);
+
+        if (new_line_found) {
+            printf("\nNEWLINE FOUND\n");
+            break;
+        } else {
+            printf("\nNEWLINE NOT FOUND ... continuing\n");
+            continue;
+        }
+        
+    }
+
+    long fsize;
+    char* contents_to_send = readEntireFile(global_file, &fsize);
+
+    if (sendto(client_socket, contents_to_send, fsize, 0, (struct sockaddr *) &client_thread_address_local, sin_thread_size_local) != fsize) {
+        perror("sendto");
+        fprintf(stderr, "Error sending response\n");
+        close(client_socket);
+
+    } else {
+        printf("Sent file contents to client\nsize: %lu\n", fsize);
+        syslog(LOG_INFO, "Closed connection from %s", s);
+        // close(client_socket);
+    }
+    free (contents_to_send);
+    close (client_socket);
+
+    info->thread_complete_flag = 1;
+    pthread_exit(NULL);
+}
+
+void cleanup_threads() {
+    struct ThreadInfo *info, *tmp;
+    pthread_mutex_lock(&thread_list_mutex);
+    
+    info = SLIST_FIRST(&thread_list);
+    while (info != NULL) {
+        tmp = SLIST_NEXT(info, entries);
+        if (info->thread_complete_flag) {
+            printf("Removing thread %lu\n", info->thread_id);
+            close(info->client_socket);
+            pthread_join(info->thread_id, NULL);
+            SLIST_REMOVE(&thread_list, info, ThreadInfo, entries);
+            free(info);
+        }
+        info = tmp;
+    }
+
+    pthread_mutex_unlock(&thread_list_mutex);
+}
+
+
+void handle_sigterm(int signum) {
+    // Perform cleanup actions here (e.g., releasing resources, closing files)
+    printf("Received SIGTERM. Cleaning up.\n");
+    close(server_socket);
+    fclose(global_file);
+    const char* file_path = "/var/tmp/aesdsocketdata";
+    if (remove(file_path) == 0) {
+        printf("Removing file %s\n", file_path);
+    } else {
+        perror("Error deleting file");
+    }
+    exit(EXIT_SUCCESS);
+}
+
+void handle_sigint(int signum) {
+    // Perform cleanup actions here (e.g., releasing resources, closing files)
+    printf("Received SIGINT. Exiting gracefully.\n");
+    close(server_socket);
+    fclose(global_file);
+    const char* file_path = "/var/tmp/aesdsocketdata";
+    if (remove(file_path) == 0) {
+        printf("Removing file %s\n", file_path);
+    } else {
+        perror("Error deleting file");
+    }
+    exit(EXIT_SUCCESS);
+}
+
+int register_signal_handlers() {
+    struct sigaction sa;
+
+    // Register signal handlers for SIGTERM and SIGINT
+    sa.sa_handler = handle_sigterm;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("sigterm handler");
+        return -1;
+    }
+
+    sa.sa_handler = handle_sigint;
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigint handler");
+        return -1;
+    }
+}
+
+int establish_socket_connection() {
+    struct addrinfo hints, *servinfo, *p;
+    int yes=1;
+    int rv;
+    // Configure host port
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    // Get Address Info to open socket
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rv));
+        return -1;
+    }
+
+    // Establish socket connection and bind to the socket
+    printf(">> Establish socket and bind\n");
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        if ((server_socket = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            perror("server: socket");
+            continue;
+        }
+
+        if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+            perror("setsockopt");
+            return -1;
+        }
+
+        if (bind(server_socket, p->ai_addr, p->ai_addrlen) == -1) {
+            close(server_socket);
+            perror("server: bind");
+            continue;
+        }
+        break;
+    }
+
+    freeaddrinfo(servinfo);
+
+    if (p == NULL) {
+        fprintf(stderr, "server: failed to bind\n");
+        return -1;
+    }
+}
+
+int start_daemon_mode() {
+    int pid = fork();
+    printf("Starting daemon on pid: %d\n", pid);
+    if (pid == -1)
+        return -1;
+    else if (pid != 0)
+        exit (EXIT_SUCCESS);
+
+    if (setsid() == -1)
+        return -1;
+
+    if (chdir("/") == -1)
+        return -1;
+
+    return pid;
+}
 
 int main() {
-    int new_fd;
+    int client_socket;
     struct sockaddr_storage client_addr;
-    socklen_t sin_size;
+    socklen_t sin_size = sizeof client_addr;
+
+    global_file = fopen("/var/tmp/aesdsocketdata", "a+");
  
     char s[INET6_ADDRSTRLEN];
     ssize_t nread;
-    char buf[BUFFER_SIZE];
     pid_t pid;
+
+    // Start timer thread
+    //pthread_t timer_thread;
+    //pthread_create(&timer_thread, NULL, timer_thread_function, global_file);
+    
 
     // Open syslog connection
     openlog("aesdsocket", LOG_PID, LOG_USER);
@@ -226,7 +369,7 @@ int main() {
 
     // Establish connection
     establish_socket_connection();
-    if (global_sockfd == -1) {
+    if (server_socket == -1) {
         perror("Error establishing socket connection");
         return -1;
     }
@@ -239,96 +382,62 @@ int main() {
     }
 
     // Start listening on port 9000
-    if (listen(global_sockfd, 10) == -1) {
+    if (listen(server_socket, 10) == -1) {
         perror("listen");
         return -1;
     }
+
     printf("Listening on port 9000\n");
     printf("server: waiting for connections...\n");
 
-    // File handler
-    FILE* file = fopen("/var/tmp/aesdsocketdata", "w+");
-    global_file = file;
-    if (file == NULL) {
-        perror("Error opening file");
-        return -1;
+    pthread_t timer_thread;
+    if(pthread_create(&timer_thread, NULL, timer_thread_function, global_file)) {
+        perror("Timer thread create");
+        goto cleanup;
     }
 
-    while(1) {
-        sin_size = sizeof client_addr;
-        char host[NI_MAXHOST], service[NI_MAXSERV];
+    // time_t last_timestamp_time = time(NULL);
 
-        new_fd = accept(global_sockfd, (struct sockaddr *)&client_addr, &sin_size);
-        printf("\nNow accepting packets on new_fd: %d\n", new_fd);
-        if (new_fd == -1) {
+    while(1) {
+        // time_t current_time = time(NULL);
+        // printf("Checking time stamp");
+        // if (current_time - last_timestamp_time >= 10) {
+        //     pthread_mutex_lock(&file_mutex);
+        //     add_timestamp_to_file(global_file);
+        //     pthread_mutex_unlock(&file_mutex);
+        //     last_timestamp_time = current_time;
+        // }
+        printf("\n Waiting for connection \n");
+        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &sin_size);
+        printf("\nNow accepting packets on client_socket: %d\n", client_socket);
+        if (client_socket == -1) {
             perror("accept");
             continue;
         }
 
-        inet_ntop(client_addr.ss_family,
-            get_in_addr((struct sockaddr *)&client_addr),
-            s, sizeof s);
-        printf("server: got connection from %s\n", s);
-        syslog(LOG_INFO, "Accepted connection from %s", s);
-
-        read_data:
-        
-        nread = recvfrom(new_fd, buf, BUFFER_SIZE, 0, 
-                        (struct sockaddr *) &client_addr, &sin_size);
-        
-        if (nread == -1) {
-            perror("recvfrom");
-            close(new_fd);
+        struct ThreadInfo *info = (struct ThreadInfo *)malloc(sizeof(struct ThreadInfo));
+        if (info == NULL) {
+            perror("Thread memory allocation error");
+            close(client_socket);
             continue;
-        };
-        printf("received %zd bytes from %s", nread, s);
-
-        buf[nread] = '\0'; 
-        int new_line_found = 0;
-        char* newString = extractDataUpToNewLine(buf, nread, &new_line_found);
-
-        fprintf(file, "%s", newString);
-        free(newString);
-
-        if (new_line_found) {
-            printf("\nNEWLINE FOUND\n");
-        } else {
-            printf("\nNEWLINE NOT FOUND ... continuing\n");
-            // fprintf(file, "%c", '\n');
-            goto read_data;
-            // close(new_fd);
-            // continue;
-            // free(newString);
         }
-        
+        info->client_socket = client_socket;
+        info->sin_thread_size = sizeof(client_addr);
+        info->client_thread_addr = client_addr;
+        info->thread_complete_flag = 0;
 
-        long fsize;
-        char* contents_to_send = readEntireFile(file, &fsize);
+        pthread_create(&info->thread_id, NULL, handle_connection, info);
+        pthread_mutex_lock(&thread_list_mutex);
+        SLIST_INSERT_HEAD(&thread_list, info, entries);
+        pthread_mutex_unlock(&thread_list_mutex);
 
- 
-        if (contents_to_send != NULL) {
-            // Now you can use the "file_contents" variable containing the file content
-            //printf("File Contents:\n%s\n", contents_to_send);
-
-             // Don't forget to free the memory when you're done using it
-        }
-
-        if (sendto(new_fd, contents_to_send, fsize, 0, (struct sockaddr *) &client_addr, sin_size) != fsize) {
-            perror("sendto");
-            fprintf(stderr, "Error sending response\n");
-            close(new_fd);
-
-        } else {
-            //printf("Sent file contents to client\n%s\nsize: %lu\n", contents_to_send, fsize);
-            printf("Sent file contents to client\nsize: %lu\n", fsize);
-            syslog(LOG_INFO, "Closed connection from %s", s);
-            close(new_fd);
-        }
-        free (contents_to_send);
-
+        // pthread_join(timer_thread, NULL);
+        cleanup_threads();
     }
+
+    cleanup:
     closelog();
-    close(global_sockfd);
+    close(server_socket);
     
     return 0;
 }

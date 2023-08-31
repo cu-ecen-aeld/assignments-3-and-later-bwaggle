@@ -7,7 +7,7 @@
 CC = $(CROSS_COMPILE)gcc
 OBJFILES = aesdsocket.o
 MAIN = aesdsocket
-CFLAGS = -g -Wall -Werror
+CFLAGS = -g -Wall -Werror -pthread
 
 all: $(MAIN)
 
