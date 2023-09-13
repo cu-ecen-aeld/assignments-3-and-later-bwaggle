@@ -40,7 +40,8 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 
     // Loop through the buffer entries starting at the read pointer
     // and wrapping around if necessary 
-    for (int i = buffer->out_offs; i < arr_end; i++) {
+    int i;
+    for (i = buffer->out_offs; i < arr_end; i++) {
         arr_pos = i % 10; // wraparound
         pos += buffer->entry[arr_pos].size;
         // printf("Position is %d and char_offset is %lu for buff size %lu\n", pos, char_offset, buffer->entry[arr_pos].size);

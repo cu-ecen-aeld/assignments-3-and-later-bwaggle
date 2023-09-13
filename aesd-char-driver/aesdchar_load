@@ -1,11 +1,14 @@
 #!/bin/sh
 module=aesdchar
 device=aesdchar
-mode="664"
+# Modified permissions becase 664 doesn't provide write permission on staff
+mode="666"
 cd `dirname $0`
 set -e
 # Group: since distributions do it differently, look for wheel or use staff
+
 if grep -q '^staff:' /etc/group; then
+    echo "Found it"
     group="staff"
 else
     group="wheel"
