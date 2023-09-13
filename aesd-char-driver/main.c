@@ -34,7 +34,8 @@ int aesd_open(struct inode *inode, struct file *filp)
      * TODO: handle open
      */
     filp->private_data = container_of(inode->i_cdev, struct aesd_dev, cdev);
-    PDEBUG("<<- OPEN MODULE: filep->private_data = %p, inode->cdev = %p", filp->private_data, inode->i_cdev);
+    // PDEBUG("<<- OPEN MODULE: filep->private_data = %p, inode->cdev = %p", filp->private_data, inode->i_cdev);
+    PDEBUG("<-- OPEN MODULE");
     return 0;
 }
 
@@ -51,10 +52,31 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = 0;
+    struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
+    struct aesd_buffer_entry *ptr_circ_buff_entry;
+    size_t entry_offset;
+
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle read
      */
+
+    if (mutex_lock_interruptible(&aesd_device.lock)) {
+        return -EINTR;
+    }
+    ptr_circ_buff_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(ptr_aesd_dev->circular_buffer), *f_pos, &entry_offset);
+    retval = ptr_circ_buff_entry->buffer_entry.size;
+
+    if (!ptr_circ_buff_entry) {
+        mutex_unlock(&aesd_device.lock);
+        return 0;
+    }
+    mutex_unlock(&aesd_device.lock);
+
+    PDEBUG("Driver read %lu bytes with offset %lld from circ buffer",retval,*f_pos);
+    PDEBUG("Driver read %s", ptr_aesd_dev->buffer_entry.buffptr);
+    copy_to_user((void *)buf, (void *)ptr_circ_buff_entry->buffptr, count);
+    
     return retval;
 }
 
@@ -62,7 +84,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = -ENOMEM;
-    char *k_buf = NULL; // buffer to keep track of user content in kernel space
+    void *k_buf = NULL; // buffer to keep track of user content in kernel space
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     size_t usr_count;
 
@@ -88,12 +110,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     usr_count = count - copy_from_user(k_buf, buf, count);
 
     // Populate the entry with pointer to kernel space buffer and count
-    ptr_aesd_dev->buffer_entry.buffptr = k_buf;
+    ptr_aesd_dev->buffer_entry.buffptr = (char *)k_buf;
     ptr_aesd_dev->buffer_entry.size = usr_count;
 
     // Set the user space position
     *f_pos = usr_count;
     retval = usr_count;
+
+    PDEBUG("Driver wrote string %s with %ld bytes", (char *)k_buf, usr_count);
 
     // Add the entry to the circular buffer
     aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer),
@@ -107,8 +131,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     // Unlock the aesd device
     mutex_unlock(&aesd_device.lock);
-
-    PDEBUG("aesd_write(): wrote string %s with %ld bytes", k_buf, usr_count);
 
     PDEBUG("<--AESD_WRITE");
     return retval;

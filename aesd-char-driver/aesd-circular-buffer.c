@@ -10,12 +10,29 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/printk.h>
 #else
 #include <string.h>
 #include <stdio.h>
 #endif
 
+#define AESD_DEBUG 1  //Remove comment on this line to enable debug
+
+#undef PDEBUG             /* undef it, just in case */
+#ifdef AESD_DEBUG
+#  ifdef __KERNEL__
+     /* This one if debugging is on, and kernel space */
+#    define PDEBUG(fmt, args...) printk( KERN_DEBUG "aesdchar: " fmt, ## args)
+#  else
+     /* This one for user space */
+#    define PDEBUG(fmt, args...) fprintf(stderr, fmt, ## args)
+#  endif
+#else
+#  define PDEBUG(fmt, args...) /* not debugging: nothing */
+#endif
+
 #include "aesd-circular-buffer.h"
+
 
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
@@ -44,10 +61,10 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     for (i = buffer->out_offs; i < arr_end; i++) {
         arr_pos = i % 10; // wraparound
         pos += buffer->entry[arr_pos].size;
-        // printf("Position is %d and char_offset is %lu for buff size %lu\n", pos, char_offset, buffer->entry[arr_pos].size);
+        // PDEBUG("Position is %d and char_offset is %lu for buff size %lu\n", pos, char_offset, buffer->entry[arr_pos].size);
         if (pos == 0) return NULL; // empty buffer
         if (char_offset < pos) {
-            // printf("Found entry %s at position %d for offset %lu\n", buffer->entry[arr_pos].buffptr, pos_start, char_offset);
+            // PDEBUG("Found entry %s at position %d for offset %lu\n", buffer->entry[arr_pos].buffptr, pos_start, char_offset);
             *entry_offset_byte_rtn = char_offset - pos_start; // position within the entry
             return &buffer->entry[arr_pos];
         }
@@ -71,26 +88,26 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 
    // Write the buffer entry at the "in" offset location
    buffer->entry[buffer->in_offs] = *add_entry;
-//    printf("Received entry %p\n", (void *)add_entry->buffptr);
-//    printf("Entry text is %s", add_entry->buffptr);
-//    printf("Added entry at location %d\n", buffer->in_offs);
-//    printf("Entry at location %d is %s\n", buffer->in_offs, buffer->entry[buffer->in_offs].buffptr);
+   PDEBUG("Received entry %p\n", (void *)add_entry->buffptr);
+   PDEBUG("Entry text is %s", add_entry->buffptr);
+   PDEBUG("Added entry at location %d\n", buffer->in_offs);
+   PDEBUG("Entry at location %d is %s\n", buffer->in_offs, buffer->entry[buffer->in_offs].buffptr);
    
 
    // Advance the write offset location ensuring for wrap-round
    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-//    printf("Incremented in_offs to %d\n", buffer->in_offs);
+   PDEBUG("Incremented in_offs to %d\n", buffer->in_offs);
 
    // When the buffer is full, advance the read location "out" offset
    if (buffer->full) {
     buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    // printf("Advanced read location to %d\n", buffer->out_offs);
+    PDEBUG("Advanced read location to %d\n", buffer->out_offs);
    }
 
    // Set the buffer full flag if the read and write offsets match
    if (buffer->in_offs == buffer->out_offs) {
     buffer->full = true;
-    // printf("Buffer is full\n");
+    PDEBUG("Buffer is full\n");
    } else {
     buffer->full = false;
    }
