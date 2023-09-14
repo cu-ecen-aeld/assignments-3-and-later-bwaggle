@@ -61,7 +61,7 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     for (i = buffer->out_offs; i < arr_end; i++) {
         arr_pos = i % 10; // wraparound
         pos += buffer->entry[arr_pos].size;
-        PDEBUG("Position is %d and char_offset is %lu for buff size %lu", pos, char_offset, buffer->entry[arr_pos].size);
+        // PDEBUG("Position is %d and char_offset is %lu for buff size %lu", pos, char_offset, buffer->entry[arr_pos].size);
         if (pos == 0) return NULL; // empty buffer
         if (char_offset < pos) {
             PDEBUG("Found entry '%s' at position %d for offset %lu", buffer->entry[arr_pos].buffptr, pos_start, char_offset);
@@ -116,16 +116,20 @@ const char * aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer,
     ptr_return = save_buffptr;
 
     PDEBUG("Buffer is full, returning %p for circ buffer pos %d", ptr_return, save_buffloc);
-    buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     PDEBUG("Advanced read location to %d", buffer->out_offs);
+
+    // Advance circular buffer "out/read" ptr location
+    buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
    }
 
-   // Set the buffer full flag if the read and write offsets match
+   // Set the buffer full flag if the read and write ptr locations match
    if (buffer->in_offs == buffer->out_offs) {
     buffer->full = true;
    } else {
     buffer->full = false;
    }
+
+   // Return overwritten ptr location so caller can free memory
    return ptr_return;
    
 }

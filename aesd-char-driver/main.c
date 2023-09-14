@@ -107,6 +107,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     const char *entry_val; // track circ buff ptr that need freed 
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     size_t usr_count;
+    int has_new_line;
 
     PDEBUG("-->AESD_WRITE");
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
@@ -140,7 +141,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     // 8. else
     // 9.   write the full entry to the circular buffer
 
-    if ( *((char *)k_buf + count - 1) != '\n') {
+    has_new_line = ( *((char *)k_buf + count - 1) == '\n') ? 1 : 0;
+
+    if (!has_new_line) {
         PDEBUG("Starting a partial write");
         if (ptr_aesd_dev->buffer_entry.size == 0) {
             // Inital partial write to the buffer entry
@@ -148,7 +151,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             ptr_aesd_dev->buffer_entry.size = usr_count;
 
             // Set the user space position
-            *f_pos = usr_count;
+            *f_pos += usr_count;
             retval = usr_count;
         } else {
             // Allocate temporary buffer of a size that will hold previous and new write
@@ -157,25 +160,33 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 mutex_unlock(&aesd_device.lock);
                 return -ENOMEM;
             }
+            PDEBUG("Allocated memory of size %ld", ptr_aesd_dev->buffer_entry.size + usr_count);
             // Copy previous write to temp buffer
             memcpy(temp_buf, ptr_aesd_dev->buffer_entry.buffptr, ptr_aesd_dev->buffer_entry.size);
+            PDEBUG("Copied from buff_entry to temp %p size of %ld", temp_buf, ptr_aesd_dev->buffer_entry.size);
 
             // Append new write to temp buffer
-            memcpy(temp_buf + ptr_aesd_dev->buffer_entry.size, k_buf, usr_count);
+            temp_buf += ptr_aesd_dev->buffer_entry.size;
+            memcpy(temp_buf, k_buf, usr_count);
+            PDEBUG("Copied from k_buf to temp %p size of %ld", temp_buf, usr_count);
+            temp_buf -= ptr_aesd_dev->buffer_entry.size;
 
             // Free previous partial buffer entry and k_buf
             if (ptr_aesd_dev->buffer_entry.buffptr) {
                 kfree(ptr_aesd_dev->buffer_entry.buffptr);
-                kfree(k_buf);
             }
+
+            kfree(k_buf);
 
             // Populate the circular buffer entry with new buffer entry
             ptr_aesd_dev->buffer_entry.buffptr = (char *)temp_buf;
             ptr_aesd_dev->buffer_entry.size += usr_count;
 
             // Update return values
-            *f_pos = ptr_aesd_dev->buffer_entry.size;
-            retval = ptr_aesd_dev->buffer_entry.size;
+            *f_pos += usr_count;
+    
+            retval = usr_count;
+       
         }
     } else {
         if (ptr_aesd_dev->buffer_entry.size == 0) {
@@ -184,7 +195,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             ptr_aesd_dev->buffer_entry.size += usr_count;
 
             // Set the user space position
-            *f_pos = usr_count;
+            *f_pos += usr_count;
             retval = usr_count;
 
             PDEBUG("Driver writing string '%s' with %ld bytes", (char *)k_buf, usr_count);
@@ -210,21 +221,25 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             memcpy(temp_buf, ptr_aesd_dev->buffer_entry.buffptr, ptr_aesd_dev->buffer_entry.size);
 
             // Append new write to temp buffer
-            memcpy(temp_buf + ptr_aesd_dev->buffer_entry.size, k_buf, usr_count);
+            temp_buf += ptr_aesd_dev->buffer_entry.size;
+            memcpy(temp_buf, k_buf, usr_count);
+            temp_buf -= ptr_aesd_dev->buffer_entry.size;
 
             // Free previous partial buffer entry and k_buf
             if (ptr_aesd_dev->buffer_entry.buffptr) {
                 kfree(ptr_aesd_dev->buffer_entry.buffptr);
-                kfree(k_buf);
+
             }
+            kfree(k_buf);
 
             // Populate the circular buffer entry with new buffer entry
             ptr_aesd_dev->buffer_entry.buffptr = (char *)temp_buf;
             ptr_aesd_dev->buffer_entry.size += usr_count;
 
             // Update return values
+            // *f_pos += usr_count;
             *f_pos = ptr_aesd_dev->buffer_entry.size;
-            retval = ptr_aesd_dev->buffer_entry.size;
+            retval = usr_count;
 
             // Add the entry to the circular buffer
             if((entry_val = 
@@ -240,6 +255,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     }
 
+    PDEBUG("Returning %ld bytes with offset %llu", retval, *f_pos );
 
     // Unlock the aesd device
     mutex_unlock(&aesd_device.lock);
