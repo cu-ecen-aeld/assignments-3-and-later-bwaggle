@@ -184,7 +184,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
             // Update return values
             *f_pos += usr_count;
-    
             retval = usr_count;
        
         }
@@ -237,8 +236,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             ptr_aesd_dev->buffer_entry.size += usr_count;
 
             // Update return values
-            // *f_pos += usr_count;
-            *f_pos = ptr_aesd_dev->buffer_entry.size;
+            *f_pos += usr_count;
+            // *f_pos = ptr_aesd_dev->buffer_entry.size;
             retval = usr_count;
 
             // Add the entry to the circular buffer
