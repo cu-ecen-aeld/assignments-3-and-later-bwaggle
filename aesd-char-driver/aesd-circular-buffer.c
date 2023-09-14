@@ -61,10 +61,10 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     for (i = buffer->out_offs; i < arr_end; i++) {
         arr_pos = i % 10; // wraparound
         pos += buffer->entry[arr_pos].size;
-        // PDEBUG("Position is %d and char_offset is %lu for buff size %lu\n", pos, char_offset, buffer->entry[arr_pos].size);
+        PDEBUG("Position is %d and char_offset is %lu for buff size %lu", pos, char_offset, buffer->entry[arr_pos].size);
         if (pos == 0) return NULL; // empty buffer
         if (char_offset < pos) {
-            // PDEBUG("Found entry %s at position %d for offset %lu\n", buffer->entry[arr_pos].buffptr, pos_start, char_offset);
+            PDEBUG("Found entry '%s' at position %d for offset %lu", buffer->entry[arr_pos].buffptr, pos_start, char_offset);
             *entry_offset_byte_rtn = char_offset - pos_start; // position within the entry
             return &buffer->entry[arr_pos];
         }
@@ -80,37 +80,41 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+const char * aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
     /**
     * TODO: implement per description
     */
 
+   const char* ptr_return = NULL;
    // Write the buffer entry at the "in" offset location
-   buffer->entry[buffer->in_offs] = *add_entry;
-   PDEBUG("Received entry %p\n", (void *)add_entry->buffptr);
-   PDEBUG("Entry text is %s", add_entry->buffptr);
-   PDEBUG("Added entry at location %d\n", buffer->in_offs);
-   PDEBUG("Entry at location %d is %s\n", buffer->in_offs, buffer->entry[buffer->in_offs].buffptr);
+   buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
+   buffer->entry[buffer->in_offs].size = add_entry->size;
+   PDEBUG("Received entry %p", (void *)add_entry->buffptr);
+   PDEBUG("Entry text is '%s'", add_entry->buffptr);
+   PDEBUG("Added entry at location %d", buffer->in_offs);
+   PDEBUG("Entry at location %d is '%s'", buffer->in_offs, buffer->entry[buffer->in_offs].buffptr);
    
 
    // Advance the write offset location ensuring for wrap-round
    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-   PDEBUG("Incremented in_offs to %d\n", buffer->in_offs);
+   PDEBUG("Incremented in_offs to %d", buffer->in_offs);
 
    // When the buffer is full, advance the read location "out" offset
    if (buffer->full) {
+    ptr_return = buffer->entry[buffer->out_offs].buffptr;
+    PDEBUG("Buffer is full, returning %p for out_offs %d", ptr_return, buffer->out_offs);
     buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    PDEBUG("Advanced read location to %d\n", buffer->out_offs);
+    PDEBUG("Advanced read location to %d", buffer->out_offs);
    }
 
    // Set the buffer full flag if the read and write offsets match
    if (buffer->in_offs == buffer->out_offs) {
     buffer->full = true;
-    PDEBUG("Buffer is full\n");
    } else {
     buffer->full = false;
    }
+   return ptr_return;
    
 }
 

@@ -52,10 +52,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = 0;
+    ssize_t bytes_not_copied;
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     struct aesd_buffer_entry *ptr_circ_buff_entry;
     size_t entry_offset;
 
+    PDEBUG("-->AESD_READ");
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle read
@@ -64,19 +66,27 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     if (mutex_lock_interruptible(&aesd_device.lock)) {
         return -EINTR;
     }
-    ptr_circ_buff_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(ptr_aesd_dev->circular_buffer), *f_pos, &entry_offset);
-    retval = ptr_circ_buff_entry->buffer_entry.size;
+    ptr_circ_buff_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(ptr_aesd_dev->circular_buffer),
+                                                                         *f_pos,
+                                                                         &entry_offset);
+    // retval = ptr_circ_buff_entry->size;
 
     if (!ptr_circ_buff_entry) {
         mutex_unlock(&aesd_device.lock);
+        PDEBUG("No more entries to read");
         return 0;
     }
-    mutex_unlock(&aesd_device.lock);
+    
+
+    bytes_not_copied = copy_to_user(buf, ptr_circ_buff_entry->buffptr, ptr_circ_buff_entry->size);
+    retval = ptr_circ_buff_entry->size;
+    *f_pos += ptr_circ_buff_entry->size;
 
     PDEBUG("Driver read %lu bytes with offset %lld from circ buffer",retval,*f_pos);
-    PDEBUG("Driver read %s", ptr_aesd_dev->buffer_entry.buffptr);
-    copy_to_user((void *)buf, (void *)ptr_circ_buff_entry->buffptr, count);
-    
+    PDEBUG("Driver read string '%s'", ptr_circ_buff_entry->buffptr);
+
+    PDEBUG("<--AESD_READ");
+    mutex_unlock(&aesd_device.lock);
     return retval;
 }
 
@@ -84,7 +94,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = -ENOMEM;
-    void *k_buf = NULL; // buffer to keep track of user content in kernel space
+    void *k_buf; // buffer to keep track of user content in kernel space
+    const char* entry_val;
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     size_t usr_count;
 
@@ -108,6 +119,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     // Copy the user space buffer to kernel space
     usr_count = count - copy_from_user(k_buf, buf, count);
+    PDEBUG("Copy from user '%s' to '%s' %lu =? %ld", buf, (char *)k_buf, count, usr_count);
 
     // Populate the entry with pointer to kernel space buffer and count
     ptr_aesd_dev->buffer_entry.buffptr = (char *)k_buf;
@@ -117,11 +129,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     *f_pos = usr_count;
     retval = usr_count;
 
-    PDEBUG("Driver wrote string %s with %ld bytes", (char *)k_buf, usr_count);
+    PDEBUG("Driver writing string '%s' with %ld bytes", (char *)k_buf, usr_count);
 
     // Add the entry to the circular buffer
-    aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer),
-                                   &(ptr_aesd_dev->buffer_entry));
+    if((entry_val = 
+        aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer), &(ptr_aesd_dev->buffer_entry)))) {
+            PDEBUG("Freeing memory");
+            kfree(entry_val);
+    }
     // kfree(usr_count);
 
     // Clear the entry for the next call
@@ -132,7 +147,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     // Unlock the aesd device
     mutex_unlock(&aesd_device.lock);
 
-    PDEBUG("<--AESD_WRITE");
+    PDEBUG("<--AESD_WRITE %lu", retval);
     return retval;
 }
 struct file_operations aesd_fops = {
@@ -214,11 +229,20 @@ void aesd_cleanup_module(void)
      * TODO: cleanup AESD specific poritions here as necessary
      */
 
+    if (mutex_lock_interruptible(&aesd_device.lock)) {
+        return;
+    }
+
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.circular_buffer, index) {
         if(entry->buffptr) {
             kfree(aesd_device.buffer_entry.buffptr);
         }
     }
+
+    if (aesd_device.buffer_entry.buffptr) {
+        kfree(aesd_device.buffer_entry.buffptr);
+    }
+    mutex_unlock(&aesd_device.lock);
 
     unregister_chrdev_region(devno, 1);
     PDEBUG("<--CLEANUP MODULE");
