@@ -19,6 +19,7 @@
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
 #include "aesdchar.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -63,29 +64,36 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
      * TODO: handle read
      */
 
+    // Lock the device
     if (mutex_lock_interruptible(&aesd_device.lock)) {
         return -EINTR;
     }
+
+    // Read from the circular buffer
     ptr_circ_buff_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(ptr_aesd_dev->circular_buffer),
                                                                          *f_pos,
                                                                          &entry_offset);
-    // retval = ptr_circ_buff_entry->size;
-
+    // No entry indicates the buffer is empty
     if (!ptr_circ_buff_entry) {
         mutex_unlock(&aesd_device.lock);
         PDEBUG("No more entries to read");
         return 0;
     }
     
-
+    // Copy the contents received from the circular buffer back to the user space buffer
     bytes_not_copied = copy_to_user(buf, ptr_circ_buff_entry->buffptr, ptr_circ_buff_entry->size);
+
+    // Size of buffer entry must be returned to the caller
     retval = ptr_circ_buff_entry->size;
+
+    // Give the caller the offset position
     *f_pos += ptr_circ_buff_entry->size;
 
     PDEBUG("Driver read %lu bytes with offset %lld from circ buffer",retval,*f_pos);
     PDEBUG("Driver read string '%s'", ptr_circ_buff_entry->buffptr);
-
     PDEBUG("<--AESD_READ");
+
+    // Unlock the device
     mutex_unlock(&aesd_device.lock);
     return retval;
 }
@@ -94,8 +102,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = -ENOMEM;
-    void *k_buf; // buffer to keep track of user content in kernel space
-    const char* entry_val;
+    void *k_buf; // kernel space buffer
+    void *temp_buf; // temp buffer for partial writes without '/n'
+    const char *entry_val; // track circ buff ptr that need freed 
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     size_t usr_count;
 
@@ -110,7 +119,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EINTR;
     }
 
-    // Allocate kernel space buffer
+    // Allocate kernel space buffer (+1 to for print statements that need a \0 char)
     if (!(k_buf = kmalloc(count, GFP_KERNEL))) {
         printk(KERN_ERR "Failed to allocate memory of size %lu", count);
         mutex_unlock(&aesd_device.lock);
@@ -118,30 +127,118 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     // Copy the user space buffer to kernel space
-    usr_count = count - copy_from_user(k_buf, buf, count);
+    usr_count = count - copy_from_user((char *)k_buf, buf, count);
     PDEBUG("Copy from user '%s' to '%s' %lu =? %ld", buf, (char *)k_buf, count, usr_count);
 
-    // Populate the entry with pointer to kernel space buffer and count
-    ptr_aesd_dev->buffer_entry.buffptr = (char *)k_buf;
-    ptr_aesd_dev->buffer_entry.size = usr_count;
+    // 1. Check for a newline
+    // 2. if (!newline):
+    // 3.   write the partial entry to aesd buffer entry
+    // 4.       create a temp buff to hold current k_buf + number of bytes in new request
+    // 5.       copy from buff_entry to temp_buff current contents
+    // 6.       append k_buf to temp_buff
+    // 7.       copy temp_buff back to buff_entry
+    // 8. else
+    // 9.   write the full entry to the circular buffer
 
-    // Set the user space position
-    *f_pos = usr_count;
-    retval = usr_count;
+    if ( *((char *)k_buf + count - 1) != '\n') {
+        PDEBUG("Starting a partial write");
+        if (ptr_aesd_dev->buffer_entry.size == 0) {
+            // Inital partial write to the buffer entry
+            ptr_aesd_dev->buffer_entry.buffptr = (char *)k_buf;
+            ptr_aesd_dev->buffer_entry.size = usr_count;
 
-    PDEBUG("Driver writing string '%s' with %ld bytes", (char *)k_buf, usr_count);
+            // Set the user space position
+            *f_pos = usr_count;
+            retval = usr_count;
+        } else {
+            // Allocate temporary buffer of a size that will hold previous and new write
+            if (!(temp_buf = kmalloc(ptr_aesd_dev->buffer_entry.size + usr_count, GFP_KERNEL))) {
+                printk(KERN_ERR "Failed to allocate memory of size %lu", count);
+                mutex_unlock(&aesd_device.lock);
+                return -ENOMEM;
+            }
+            // Copy previous write to temp buffer
+            memcpy(temp_buf, ptr_aesd_dev->buffer_entry.buffptr, ptr_aesd_dev->buffer_entry.size);
 
-    // Add the entry to the circular buffer
-    if((entry_val = 
-        aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer), &(ptr_aesd_dev->buffer_entry)))) {
-            PDEBUG("Freeing memory");
-            kfree(entry_val);
+            // Append new write to temp buffer
+            memcpy(temp_buf + ptr_aesd_dev->buffer_entry.size, k_buf, usr_count);
+
+            // Free previous partial buffer entry and k_buf
+            if (ptr_aesd_dev->buffer_entry.buffptr) {
+                kfree(ptr_aesd_dev->buffer_entry.buffptr);
+                kfree(k_buf);
+            }
+
+            // Populate the circular buffer entry with new buffer entry
+            ptr_aesd_dev->buffer_entry.buffptr = (char *)temp_buf;
+            ptr_aesd_dev->buffer_entry.size += usr_count;
+
+            // Update return values
+            *f_pos = ptr_aesd_dev->buffer_entry.size;
+            retval = ptr_aesd_dev->buffer_entry.size;
+        }
+    } else {
+        if (ptr_aesd_dev->buffer_entry.size == 0) {
+            // Populate the circular buffer entry with pointer to kernel space buffer and size
+            ptr_aesd_dev->buffer_entry.buffptr = (char *)k_buf;
+            ptr_aesd_dev->buffer_entry.size += usr_count;
+
+            // Set the user space position
+            *f_pos = usr_count;
+            retval = usr_count;
+
+            PDEBUG("Driver writing string '%s' with %ld bytes", (char *)k_buf, usr_count);
+
+            // Add the entry to the circular buffer
+            if((entry_val = 
+                aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer), &(ptr_aesd_dev->buffer_entry)))) {
+                    PDEBUG("Freeing memory");
+                    kfree(entry_val);
+            }
+
+            // Clear the entry for the next call
+            ptr_aesd_dev->buffer_entry.buffptr = NULL;
+            ptr_aesd_dev->buffer_entry.size = 0;
+        } else {
+            // Allocate temporary buffer of a size that will hold previous and new write
+            if (!(temp_buf = kmalloc(ptr_aesd_dev->buffer_entry.size + usr_count, GFP_KERNEL))) {
+                printk(KERN_ERR "Failed to allocate memory of size %lu", count);
+                mutex_unlock(&aesd_device.lock);
+                return -ENOMEM;
+            }
+            // Copy previous write to temp buffer
+            memcpy(temp_buf, ptr_aesd_dev->buffer_entry.buffptr, ptr_aesd_dev->buffer_entry.size);
+
+            // Append new write to temp buffer
+            memcpy(temp_buf + ptr_aesd_dev->buffer_entry.size, k_buf, usr_count);
+
+            // Free previous partial buffer entry and k_buf
+            if (ptr_aesd_dev->buffer_entry.buffptr) {
+                kfree(ptr_aesd_dev->buffer_entry.buffptr);
+                kfree(k_buf);
+            }
+
+            // Populate the circular buffer entry with new buffer entry
+            ptr_aesd_dev->buffer_entry.buffptr = (char *)temp_buf;
+            ptr_aesd_dev->buffer_entry.size += usr_count;
+
+            // Update return values
+            *f_pos = ptr_aesd_dev->buffer_entry.size;
+            retval = ptr_aesd_dev->buffer_entry.size;
+
+            // Add the entry to the circular buffer
+            if((entry_val = 
+                aesd_circular_buffer_add_entry(&(ptr_aesd_dev->circular_buffer), &(ptr_aesd_dev->buffer_entry)))) {
+                    PDEBUG("Freeing memory");
+                    kfree(entry_val);
+            }
+
+            // Clear the entry for the next call
+            ptr_aesd_dev->buffer_entry.buffptr = NULL;
+            ptr_aesd_dev->buffer_entry.size = 0;
+        }
+
     }
-    // kfree(usr_count);
-
-    // Clear the entry for the next call
-    ptr_aesd_dev->buffer_entry.buffptr = NULL;
-    ptr_aesd_dev->buffer_entry.size = 0;
 
 
     // Unlock the aesd device

@@ -86,8 +86,17 @@ const char * aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer,
     * TODO: implement per description
     */
 
-   const char* ptr_return = NULL;
-   // Write the buffer entry at the "in" offset location
+   const char *ptr_return = NULL;
+   const char *save_buffptr;
+   uint8_t save_buffloc;
+
+   // Save buffptr for the case of a full buffer.
+   // The entry will be overwritten and the buffptr needs to 
+   // be returned to the caller so it can be freed
+   save_buffptr = buffer->entry[buffer->in_offs].buffptr;
+   save_buffloc = buffer->in_offs;
+
+   // Write the buffer entry at the "in/write" offset location
    buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
    buffer->entry[buffer->in_offs].size = add_entry->size;
    PDEBUG("Received entry %p", (void *)add_entry->buffptr);
@@ -100,10 +109,13 @@ const char * aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer,
    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
    PDEBUG("Incremented in_offs to %d", buffer->in_offs);
 
-   // When the buffer is full, advance the read location "out" offset
+   // When the buffer is full, advance the read location "out/read" offset
    if (buffer->full) {
-    ptr_return = buffer->entry[buffer->out_offs].buffptr;
-    PDEBUG("Buffer is full, returning %p for out_offs %d", ptr_return, buffer->out_offs);
+    // Set return value to saved buffer pointer that will be overwritten
+    // so caller can free the memory
+    ptr_return = save_buffptr;
+
+    PDEBUG("Buffer is full, returning %p for circ buffer pos %d", ptr_return, save_buffloc);
     buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     PDEBUG("Advanced read location to %d", buffer->out_offs);
    }
