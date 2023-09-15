@@ -20,6 +20,14 @@
 
 #define PORT "9000"
 #define BUFFER_SIZE 100000
+#define USE_AESD_CHAR_DEVICE 1
+
+#ifdef USE_AESD_CHAR_DEVICE
+#define FILE_NAME "/dev/aesdchar"
+#else
+#define FILE_NAME "/var/tmp/aesdsocketdata"
+#endif
+
 
 int server_socket;
 FILE* global_file = NULL;
@@ -38,7 +46,7 @@ SLIST_HEAD(ThreadList, ThreadInfo) thread_list = SLIST_HEAD_INITIALIZER(thread_l
 pthread_mutex_t thread_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void add_timestamp_to_file(FILE *file) {
+void add_timestamp_to_file() {
     time_t current_time;
     struct tm *time_info;
     char timestamp[128];
@@ -49,7 +57,9 @@ void add_timestamp_to_file(FILE *file) {
     strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z", time_info);
 
     pthread_mutex_lock(&file_mutex);
+    FILE* file = fopen(FILE_NAME, "a+");
     fprintf(file, "%s\n", timestamp);
+    fclose(file);
     pthread_mutex_unlock(&file_mutex);
     printf("%s\n", timestamp);
 
@@ -58,11 +68,11 @@ void add_timestamp_to_file(FILE *file) {
 
 // Thread that writes timestamp to file every 10 seconds
 void *timer_thread_function(void *arg) {
-    FILE* file = (FILE *)arg;
+
     printf("Timer thread is starting ... \n");
 
     while(1) {
-        add_timestamp_to_file(file);
+        add_timestamp_to_file();
         sleep(10);
     }
     return NULL;
@@ -113,8 +123,37 @@ char* extract_data_up_to_newline(char *buf, int nread, int* new_line_found) {
 
 }
 
-char* readEntireFile(FILE* file, long* fsize) {
+char* read_char_device(long* fsize) {
 
+    pthread_mutex_lock(&file_mutex);
+    FILE* file = fopen(FILE_NAME, "r");
+
+    // Allocate memory for the file contents (+1 for null-terminator)
+    char* file_contents = (char*)malloc(BUFFER_SIZE);
+    if (file_contents == NULL) {
+        fclose(file);
+        perror("Memory allocation failed");
+        return NULL;
+    }
+
+    // Read the entire file into file_contents
+    size_t read_size = fread(file_contents, 1, BUFFER_SIZE, file);
+    *fsize = read_size;
+    printf("Read file of size %ld\n", read_size);
+
+    // Null-terminate the string
+    file_contents[read_size] = '\n';
+    file_contents[read_size] = '\0';
+    fclose(file);
+    pthread_mutex_unlock(&file_mutex);
+
+    return file_contents;
+}
+
+char* read_file(long* fsize) {
+
+    pthread_mutex_lock(&file_mutex);
+    FILE* file = fopen(FILE_NAME, "r");
     // Get the file size
     fseek(file, 0, SEEK_END);
     long file_size = ftell(file);
@@ -141,6 +180,8 @@ char* readEntireFile(FILE* file, long* fsize) {
 
     // Null-terminate the string
     file_contents[file_size] = '\0';
+    fclose(file);
+    pthread_mutex_unlock(&file_mutex);
 
     return file_contents;
 }
@@ -183,7 +224,9 @@ void *handle_connection(void *arg) {
         int new_line_found = 0;
         char* newString = extract_data_up_to_newline(buf, nread, &new_line_found);
 
-        fprintf(global_file, "%s", newString);
+        FILE * file = fopen(FILE_NAME, "a+");
+        fprintf(file, "%s", newString);
+        fclose(file);
         free(newString);
         pthread_mutex_unlock(&file_mutex);
 
@@ -199,7 +242,14 @@ void *handle_connection(void *arg) {
 
     // Read entire contennts of appended file
     // Packets are appended by each thread independently
-    char* contents_to_send = readEntireFile(global_file, &fsize);
+    
+    #ifdef USE_AESD_CHAR_DEVICE
+    char* contents_to_send = read_char_device(&fsize);
+    #else
+    char* contents_to_send = read_file(&fsize);
+    #endif
+
+
     if (contents_to_send == NULL) {
         free(contents_to_send);
     }
@@ -211,7 +261,7 @@ void *handle_connection(void *arg) {
         close(client_socket);
 
     } else {
-        printf("Sent file contents to client\nsize: %lu\n", fsize);
+        printf("\nSent file contents to client\nsize: %lu\n", fsize);
         syslog(LOG_INFO, "Closed connection from %s", s);
     }
 
@@ -226,7 +276,7 @@ void *handle_connection(void *arg) {
 
 // Loop the threads, check for compelete status.
 // If complete, remove from linked list and exit
-void cleanup_threads(pthread_t timer_thread_id) {
+void cleanup_threads() {
     struct ThreadInfo *info, *tmp;
     pthread_mutex_lock(&thread_list_mutex);
     
@@ -255,13 +305,17 @@ void handle_sigterm(int signum) {
     // Perform cleanup actions here (e.g., releasing resources, closing files)
     printf("Received SIGTERM. Cleaning up.\n");
     close(server_socket);
+
+    #ifndef USE_AESD_CHAR_DEVICE
     fclose(global_file);
+    unlink(FILE_NAME);
     const char* file_path = "/var/tmp/aesdsocketdata";
     if (remove(file_path) == 0) {
         printf("Removing file %s\n", file_path);
     } else {
         perror("Error deleting file");
     }
+    #endif
     exit(EXIT_SUCCESS);
 }
 
@@ -269,14 +323,19 @@ void handle_sigint(int signum) {
     // Perform cleanup actions here (e.g., releasing resources, closing files)
     printf("Received SIGINT. Exiting gracefully.\n");
     close(server_socket);
-    fclose(global_file);
     closelog();
+
+    #ifndef USE_AESD_CHAR_DEVICE
+    fclose(global_file);
+    unlink(FILE_NAME);
+   
     const char* file_path = "/var/tmp/aesdsocketdata";
     if (remove(file_path) == 0) {
         printf("Removing file %s\n", file_path);
     } else {
         perror("Error deleting file");
     }
+    #endif
     exit(EXIT_SUCCESS);
 }
 
@@ -370,8 +429,11 @@ int main() {
     pid_t pid;
 
     // All child threads write to this file
-    global_file = fopen("/var/tmp/aesdsocketdata", "a+");
- 
+    printf("File name: %s\n", FILE_NAME);
+
+    #ifndef USE_AESD_CHAR_DEVICE
+    global_file = fopen(FILE_NAME, "a+");
+    #endif
 
     // Open syslog connection
     openlog("aesdsocket", LOG_PID, LOG_USER);
@@ -402,11 +464,13 @@ int main() {
     printf("Listening on port 9000\n");
     printf("server: waiting for connections...\n");
 
+    #ifndef USE_AESD_CHAR_DEVICE
     pthread_t timer_thread;
     if(pthread_create(&timer_thread, NULL, timer_thread_function, global_file)) {
         perror("Timer thread create");
         goto cleanup_timer;
     }
+    #endif
 
     while(1) {
         // Wait for and accept a client connection
@@ -440,7 +504,7 @@ int main() {
         SLIST_INSERT_HEAD(&thread_list, info, entries);
         pthread_mutex_unlock(&thread_list_mutex);
 
-        cleanup_threads(timer_thread);
+        cleanup_threads();
     }
 
     cleanup_timer:
