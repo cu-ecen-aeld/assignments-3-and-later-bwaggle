@@ -53,10 +53,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = 0;
-    ssize_t bytes_not_copied;
+    // ssize_t bytes_not_copied;
     struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     struct aesd_buffer_entry *ptr_circ_buff_entry;
-    size_t entry_offset;
+    const void *data_to_copy_from_buffer;
+    size_t entry_offset, bytes_available, bytes_to_copy, bytes_not_copied;
 
     PDEBUG("-->AESD_READ");
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
@@ -69,7 +70,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         return -EINTR;
     }
 
-    // Read from the circular buffer
+    // Find the buffer entry for the given offset
     ptr_circ_buff_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(ptr_aesd_dev->circular_buffer),
                                                                          *f_pos,
                                                                          &entry_offset);
@@ -77,20 +78,26 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     if (!ptr_circ_buff_entry) {
         mutex_unlock(&aesd_device.lock);
         PDEBUG("No more entries to read");
-        return 0;
+        return 0; // Buffer is empty, return 0 bytes read;
     }
+
+    data_to_copy_from_buffer = ptr_circ_buff_entry->buffptr + entry_offset;
+    bytes_available = ptr_circ_buff_entry->size - entry_offset;
+    bytes_to_copy = min(bytes_available, count);
     
-    // Copy the contents received from the circular buffer back to the user space buffer
-    bytes_not_copied = copy_to_user(buf, ptr_circ_buff_entry->buffptr, ptr_circ_buff_entry->size);
-
-    // Size of buffer entry must be returned to the caller
-    retval = ptr_circ_buff_entry->size;
-
-    // Give the caller the offset position
-    *f_pos += ptr_circ_buff_entry->size;
+    // Copy data from the circular buffer to the user space buffer
+    bytes_not_copied = copy_to_user(buf, data_to_copy_from_buffer, bytes_to_copy);
+    if (bytes_not_copied > 0) {
+        mutex_unlock(&aesd_device.lock);
+        return -EFAULT; // Failed to copy data to user space
+    } 
+ 
+    // Increment the user space offset position by number of bytes read
+    retval = bytes_to_copy;
+    *f_pos += retval;
 
     PDEBUG("Driver read %lu bytes with offset %lld from circ buffer",retval,*f_pos);
-    PDEBUG("Driver read string '%s'", ptr_circ_buff_entry->buffptr);
+    PDEBUG("Driver read string '%s'", (char *)data_to_copy_from_buffer);
     PDEBUG("<--AESD_READ");
 
     // Unlock the device
@@ -262,12 +269,44 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     PDEBUG("<--AESD_WRITE %lu", retval);
     return retval;
 }
+
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence) {
+    // struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
+    loff_t circ_buff_size = 0;
+    loff_t ret_offset = -EINVAL;
+
+    int index;
+    struct aesd_buffer_entry *entry;
+
+    if (mutex_lock_interruptible(&aesd_device.lock)) {
+        return -EINTR;
+    }
+
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.circular_buffer, index) {
+        if(entry->buffptr) {
+            circ_buff_size += entry->size;
+        }
+    }
+
+    ret_offset = fixed_size_llseek(filp, off, whence, circ_buff_size);
+
+    mutex_unlock(&aesd_device.lock);
+    PDEBUG("llseek cmd=%d, buf size = %lld, offset_in = %lld, offset ret = %lld", 
+        whence,
+        circ_buff_size,
+        off, 
+        ret_offset);
+    // filp->f_pos = ret_offset;
+    return ret_offset;
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
+    .llseek = aesd_llseek,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
