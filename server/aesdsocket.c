@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <sys/queue.h>
 #include <stddef.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define PORT "9000"
 #define BUFFER_SIZE 100000
@@ -123,10 +124,34 @@ char* extract_data_up_to_newline(char *buf, int nread, int* new_line_found) {
 
 }
 
-char* read_char_device(long* fsize) {
+char* read_char_device(long* fsize, int found_cmd, uint32_t write_cmd, uint32_t write_cmd_offset) {
 
+    struct aesd_seekto seekto;
+    int file_num;
+    uint32_t encoded_value = 0;
+    int error;
+
+    // Lock file access
     pthread_mutex_lock(&file_mutex);
     FILE* file = fopen(FILE_NAME, "r");
+
+    // Send an ioctl to SEEK_SET the file position if the appropriate
+    // command was found in the socket data stream
+    if (found_cmd) {
+        // Encode both the write_cmd and write_cmd_offset into a 
+        // single uint32_t value.
+        // This works around an issue where the seekto struct is not
+        // being passed properly to the ioctl. Only the first member
+        // is being passed.
+        encoded_value = (write_cmd << 4) | write_cmd_offset;
+        seekto.write_cmd = encoded_value;
+        seekto.write_cmd_offset = 0;
+        file_num = fileno(file);
+
+        printf("\nSending ioctl command write_cmd '%u', write_cmd_offset '%u'\n", seekto.write_cmd, seekto.write_cmd_offset);
+        error = ioctl(file_num, AESDCHAR_IOCSEEKTO, &seekto);
+        printf("Error status is : %d\n", error);
+    }
 
     // Allocate memory for the file contents (+1 for null-terminator)
     char* file_contents = (char*)malloc(BUFFER_SIZE);
@@ -196,6 +221,8 @@ void *handle_connection(void *arg) {
     long fsize;
     char buf[BUFFER_SIZE];
     char s[INET6_ADDRSTRLEN];
+    int found_ioctl_cmd = 0;
+    uint32_t write_cmd, write_cmd_offset;
 
 
     printf("Thread %lu processing client socket %d\n", info->thread_id, client_socket);
@@ -224,9 +251,23 @@ void *handle_connection(void *arg) {
         int new_line_found = 0;
         char* newString = extract_data_up_to_newline(buf, nread, &new_line_found);
 
-        FILE * file = fopen(FILE_NAME, "a+");
-        fprintf(file, "%s", newString);
-        fclose(file);
+        const char *search_string = "AESDCHAR_IOCSEEKTO:";
+        const char *match_string = NULL;
+        const char *result = strstr(newString, search_string);
+
+        if (result != NULL) {
+            found_ioctl_cmd= 1;
+            match_string = result + strlen(search_string);
+            sscanf(match_string, "%d,%d", &write_cmd, &write_cmd_offset);
+            printf("Found ioctl command write_cmd %d, write_cmd_offset %d", write_cmd, write_cmd_offset);
+        }
+
+        if (!found_ioctl_cmd) {
+            FILE * file = fopen(FILE_NAME, "a+");
+            fprintf(file, "%s", newString);
+            fclose(file);
+        }
+
         free(newString);
         pthread_mutex_unlock(&file_mutex);
 
@@ -240,11 +281,11 @@ void *handle_connection(void *arg) {
         
     }
 
-    // Read entire contennts of appended file
+    // Read entire contents of appended file
     // Packets are appended by each thread independently
     
     #ifdef USE_AESD_CHAR_DEVICE
-    char* contents_to_send = read_char_device(&fsize);
+    char* contents_to_send = read_char_device(&fsize, found_ioctl_cmd, write_cmd, write_cmd_offset);
     #else
     char* contents_to_send = read_file(&fsize);
     #endif

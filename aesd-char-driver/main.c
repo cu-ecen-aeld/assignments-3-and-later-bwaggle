@@ -19,6 +19,7 @@
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
@@ -271,7 +272,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 }
 
 loff_t aesd_llseek(struct file *filp, loff_t off, int whence) {
-    // struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
     loff_t circ_buff_size = 0;
     loff_t ret_offset = -EINVAL;
 
@@ -296,17 +296,86 @@ loff_t aesd_llseek(struct file *filp, loff_t off, int whence) {
         circ_buff_size,
         off, 
         ret_offset);
-    // filp->f_pos = ret_offset;
     return ret_offset;
+}
+
+static long aesd_adjust_file_offset(struct file *filp, uint32_t write_cmd, uint32_t write_cmd_offset) {
+    long retval = -EINVAL;
+    struct aesd_dev *ptr_aesd_dev = (struct aesd_dev *)filp->private_data;
+    uint32_t decode_write_cmd = 0;
+    uint32_t decode_write_cmd_offset = 0;
+
+    // Acquire a lock
+    if (mutex_lock_interruptible(&aesd_device.lock)) {
+        return -ERESTARTSYS;
+    }
+
+    // Decode the write_cmd and write_cmd_offset
+    // This works around an issue where the seekto struct is not
+    // being passed properly to the ioctl. Only the first member
+    // is being passed.
+    decode_write_cmd_offset = write_cmd & 0xF;
+    decode_write_cmd = (write_cmd >> 4) & 0xF;
+
+    PDEBUG("Driver received write command %d, write_cmd_offset %d",
+            decode_write_cmd,
+            decode_write_cmd_offset);
+
+    if (decode_write_cmd >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+        PDEBUG("ERROR: WRITE COMMAND OFFSET OUT OF RANGE");
+        return -EINVAL;
+    }
+
+    // Get the file position to implement SEEK_SET
+    retval = aesd_circular_buffer_get_fpos(&(ptr_aesd_dev->circular_buffer),
+                                             decode_write_cmd,
+                                             decode_write_cmd_offset);
+    // Update he file structure
+    filp->f_pos = retval;
+
+    // Release lock
+    mutex_unlock(&aesd_device.lock);
+
+    return 0;
+
+}
+
+long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+    long retval = -EINVAL;
+
+    switch(cmd) {
+        
+        case AESDCHAR_IOCSEEKTO:
+        {
+            struct aesd_seekto seekto;
+            if(copy_from_user(&seekto, (const void __user *)arg, sizeof(seekto) != 0)) {
+                return -EFAULT;
+            } else {
+                PDEBUG("Driver received write command %d, write_cmd_offset %d", 
+                        seekto.write_cmd, 
+                        seekto.write_cmd_offset);
+
+                retval = aesd_adjust_file_offset(filp, seekto.write_cmd, seekto.write_cmd_offset);
+            }
+            break;
+        }
+        default:
+            return -EINVAL;
+            break;
+    }
+
+    return retval;
 }
 
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
     .write =    aesd_write,
+    .unlocked_ioctl = aesd_unlocked_ioctl,
     .open =     aesd_open,
     .release =  aesd_release,
     .llseek = aesd_llseek,
+
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -324,8 +393,6 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
     PDEBUG("<--SETUP_CDEV");
     return err;
 }
-
-
 
 int aesd_init_module(void)
 {

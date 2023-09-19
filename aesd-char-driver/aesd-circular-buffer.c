@@ -73,6 +73,26 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     return NULL;
 }
 
+long aesd_circular_buffer_get_fpos(struct aesd_circular_buffer *buffer, uint32_t buff_pos, uint32_t offset) {
+    int byte_pos = 0;
+    int arr_pos = 0;
+    int pos_count = 0;
+    int arr_end = buffer->out_offs + AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    long retval = 0;
+    int i;
+
+    PDEBUG("aesd_circular_buffer_get_fpos received buff_pos %d, offset %d", buff_pos, offset);
+    for (i = buffer->out_offs; i < arr_end; i++) {
+        arr_pos = i % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        if (pos_count == buff_pos) break;
+        byte_pos += buffer->entry[arr_pos].size;
+        pos_count++;
+    }
+    retval = byte_pos + offset;
+    PDEBUG("aesd_circular_buffer_get_fpos: returning file position %ld", retval);
+    return retval;
+} 
+
 /**
 * Adds entry @param add_entry to @param buffer in the location specified in buffer->in_offs.
 * If the buffer was already full, overwrites the oldest entry and advances buffer->out_offs to the
